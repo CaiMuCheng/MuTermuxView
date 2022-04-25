@@ -4,8 +4,9 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
 import android.graphics.Typeface
+import android.text.*
+import android.text.style.ForegroundColorSpan
 import android.util.AttributeSet
 import android.util.Log
 import android.view.GestureDetector
@@ -15,7 +16,7 @@ import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
-import com.mucheng.mutermux.util.getLineHeight
+import com.mucheng.mutermux.interfaces.OnShellEventListener
 import com.mucheng.mutermux.util.getSp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,42 +25,30 @@ import kotlinx.coroutines.sync.Mutex
 
 class TermuxView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
-) : View(context, attrs, defStyleAttr) {
+) : View(context, attrs, defStyleAttr), OnShellEventListener {
 
     private var backgroundColor = Color.BLACK
 
     private val inputConnection = TermuxInputConnection(this, true)
 
-    private val userColor = Color.parseColor("#497ce3")
-
-    private val userText = "@user ~ "
-
-    private val userPaint = Paint().apply {
-        isAntiAlias = true
-        textSize = getSp(context, 16)
-        color = userColor
+    private val userText = SpannableStringBuilder("@user ~ ").apply {
+        setSpan(ForegroundColorSpan(Color.parseColor("#497ce3")), 0, length, 0)
     }
-
-    private val pathColor = Color.parseColor("#ad91e9")
 
     @SuppressLint("SdCardPath")
-    private val pathText = "/sdcard $ "
-
-    private val pathPaint = Paint().apply {
-        isAntiAlias = true
-        textSize = getSp(context, 16)
-        color = pathColor
+    private var pathText = SpannableStringBuilder("/sdcard $ ").apply {
+        setSpan(ForegroundColorSpan(Color.parseColor("#ad91e9")), 0, length, 0)
     }
 
-    private val textPaint = Paint().apply {
+    private var content = StringBuilder()
+
+    private val textPaint = TextPaint().apply {
         isAntiAlias = true
         textSize = getSp(context, 16)
         color = Color.WHITE
     }
 
-    private val lineContent = arrayListOf(
-        LineContent("echo 'emm'").also { it.setHasBefore(true) }
-    )
+    private val lineTexts = arrayListOf("")
 
     private val eventHandler = EventHandler(this)
 
@@ -73,7 +62,9 @@ class TermuxView @JvmOverloads constructor(
         isFocusable = true
         isFocusableInTouchMode = true
 
-        cursor.row += lineContent[cursor.index].getBufferSize()
+        cursor.row += content.length
+        // 注册 Shell
+        ShellExecutor.setOnShellEventListener(this)
     }
 
     override fun setBackgroundColor(color: Int) {
@@ -92,36 +83,25 @@ class TermuxView @JvmOverloads constructor(
         }
     }
 
+    private val buffer = SpannableStringBuilder()
+
+    @Suppress("DEPRECATION")
+    @SuppressLint("DrawAllocation")
     override fun onDraw(canvas: Canvas) {
         canvas.drawColor(backgroundColor)
-        val lineCount = lineContent.size
+        buffer.clear()
+        buffer.clearSpans()
 
-        (0 until lineCount).asSequence().map { lineContent[it] }
-            .forEachIndexed { index, lineContent ->
-                val line = index + 1
-
-                var width = 0f
-                if (lineContent.hasBefore()) {
-                    canvas.drawText(userText, 0f, line * getLineHeight(userPaint), userPaint)
-                    width += userPaint.measureText(userText)
-                    canvas.drawText(
-                        pathText,
-                        width,
-                        line * getLineHeight(pathPaint),
-                        pathPaint
-                    )
-                    width += pathPaint.measureText(pathText)
-                }
-
-                // 绘制代码
-                canvas.drawText(
-                    lineContent.getBuffer().toString(),
-                    width,
-                    line * getLineHeight(textPaint),
-                    textPaint
+        val text =
+            buffer.append(StringBuilder(lineTexts.joinToString(separator = "\n")).also {
+                if (it.isNotEmpty()) it.append(
+                    "\n"
                 )
-            }
-
+            }).append(userText).append(pathText).append(content)
+        val staticLayout = StaticLayout(
+            text, textPaint, width, Layout.Alignment.ALIGN_NORMAL, 1f, 0f, true
+        )
+        staticLayout.draw(canvas)
     }
 
     override fun onCheckIsTextEditor(): Boolean {
@@ -143,10 +123,8 @@ class TermuxView @JvmOverloads constructor(
                     val row = cursor.row
 
                     if (row > 0) {
-                        val lineContent = lineContent[index]
-                        val buffer = lineContent.getBuffer()
                         cursor.row--
-                        buffer.deleteCharAt(cursor.row)
+                        content.deleteCharAt(cursor.row)
                         invalidate()
                         return super.onKeyDown(keyCode, event)
                     }
@@ -163,8 +141,6 @@ class TermuxView @JvmOverloads constructor(
     }
 
     fun setTypeface(typeface: Typeface) {
-        userPaint.typeface = typeface
-        pathPaint.typeface = typeface
         textPaint.typeface = typeface
     }
 
@@ -179,26 +155,24 @@ class TermuxView @JvmOverloads constructor(
     private var environmentPath = ""
 
     fun setEnvironmentPath(path: String) {
+        updatePathText(path)
         environmentPath = path
     }
 
     fun commitText(text: String) {
-        val index = cursor.index
         val row = cursor.row
-        val lineContent = lineContent[index]
 
         if (text != "\n") {
-            val buffer = lineContent.getBuffer()
 
-            if (row < lineContent.getBufferSize()) {
-                buffer.insert(row, text)
+            if (row < content.length) {
+                content.insert(row, text)
                 cursor.row += text.length
                 invalidate()
                 return
             }
 
             cursor.row += text.length
-            buffer.append(text)
+            content.append(text)
             invalidate()
             return
         }
@@ -206,14 +180,48 @@ class TermuxView @JvmOverloads constructor(
         // 按回车了应执行代码
         CoroutineScope(Dispatchers.IO).launch {
             lock.lock()
-            val result = ShellExecutor.execute(environmentPath, lineContent.getBuffer().toString())
+            val cmd = content.toString()
+            lineTexts.add(cmd)
+            Log.e("cont", content.toString())
+            val result = ShellExecutor.execute(environmentPath, cmd)
             if (result.isSuccess) {
-                Log.e("Text", "${result.getOrNull()}")
+                lineTexts.add("Success: ${result.getOrNull()}")
             } else {
-                Log.e("Error", "${result.exceptionOrNull()}")
+                lineTexts.add("Error: ${result.exceptionOrNull()?.message}")
             }
+            postInvalidate()
+            content.clear()
             lock.unlock()
         }
+
+    }
+
+    override fun onShellEvent(command: String, params: Array<String>): Boolean {
+        when (command) {
+
+            "cd" -> {
+                if (params.isEmpty() || params.size > 1) {
+                    return false
+                }
+
+                // 获取参数
+                val path = params[0]
+                Log.e("Text", "$command $path")
+                updatePathText(path)
+                return true
+            }
+
+        }
+
+        return false
+    }
+
+    private fun updatePathText(path: String) {
+        pathText = SpannableStringBuilder("$path $ ").apply {
+            setSpan(ForegroundColorSpan(Color.parseColor("#ad91e9")), 0, length, 0)
+        }
+
+        invalidate()
     }
 
 }

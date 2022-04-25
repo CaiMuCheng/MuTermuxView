@@ -2,6 +2,7 @@ package com.mucheng.mutermux
 
 import android.content.Context
 import android.util.Log
+import com.mucheng.mutermux.interfaces.OnShellEventListener
 import java.io.BufferedWriter
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -12,25 +13,35 @@ import kotlin.coroutines.suspendCoroutine
 
 object ShellExecutor {
 
+    private var onShellEventListener: OnShellEventListener? = null
+
+    fun setOnShellEventListener(onShellEventListener: OnShellEventListener) {
+        this.onShellEventListener = onShellEventListener
+    }
+
     suspend fun execute(environmentPath: String, command: String) =
         suspendCoroutine<Result<String>> {
             thread {
                 val result = runCatching {
+                    if (command.isEmpty()) {
+                        return@runCatching ""
+                    }
                     // 删除前后空格
                     // 清除中间的空格
                     // 执行
+                    val commands =
+                        command.trim().replace("\\s+".toRegex(), "#").split("#").toTypedArray()
+                    val func = commands[0]
+                    val parameters = if (command.length > 1) {
+                        val list = commands.toMutableList()
+                        list.removeAt(0)
+                        list.toTypedArray()
+                    } else {
+                        emptyArray()
+                    }
 
-                    val file = File("$environmentPath/cache.sh")
-                    val bw = BufferedWriter(FileWriter(file))
-                    bw.write(command)
-                    bw.flush()
-                    bw.close()
-
-                    val permissionProcess = Runtime.getRuntime().exec("chmod 777 $file")
-                    val outPutStream = permissionProcess.outputStream.bufferedWriter()
-
-                    outPutStream.write(file.absolutePath)
-                    outPutStream.flush()
+                    val permissionProcess =
+                        Runtime.getRuntime().exec(commands, arrayOf(), File(environmentPath))
 
                     val code = permissionProcess.waitFor()
 
@@ -48,7 +59,12 @@ object ShellExecutor {
                     if (code == 0) {
                         String(byteArrayOutputStream.toByteArray())
                     } else {
-                        "运行 $command 异常, 错误码: $code"
+                        val result = onShellEventListener?.onShellEvent(func, parameters) ?: false
+                        if (result) {
+                            ""
+                        } else {
+                            "运行 $command 异常, 错误码: $code"
+                        }
                     }
                 }
 
