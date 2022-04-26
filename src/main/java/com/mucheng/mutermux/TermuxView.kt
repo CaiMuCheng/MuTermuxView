@@ -26,8 +26,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import java.io.File
 
-class TermuxView @JvmOverloads constructor(
+@Suppress("LeakingThis")
+open class TermuxView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
 ) : View(context, attrs, defStyleAttr), OnShellEventListener {
 
@@ -91,6 +93,11 @@ class TermuxView @JvmOverloads constructor(
 
     fun receiveOnDraw(receiver: () -> Unit) {
         this.receiver = receiver
+    }
+
+    private var onShellEventListener: OnShellEventListener? = null
+    fun addOnShellEventListener(onShellEventListener: OnShellEventListener) {
+        this.onShellEventListener = onShellEventListener
     }
 
     private val buffer = SpannableStringBuilder()
@@ -222,7 +229,7 @@ class TermuxView @JvmOverloads constructor(
 
             } else {
                 val cause = result.exceptionOrNull()?.cause.toString()
-                val error = cause.split(", ")[1]
+                val error = cause.split(", ").getOrNull(1) ?: ""
 
                 lineTexts.add("Error: $error")
                 translation.translateY(getLineHeight(textPaint))
@@ -272,16 +279,39 @@ class TermuxView @JvmOverloads constructor(
 
         }
 
-        return ShellExecutor.ShellEvent.SUCCESSFUL
+        return onShellEventListener?.onShellEvent(command, params)
+            ?: ShellExecutor.ShellEvent.SUCCESSFUL
     }
 
     private fun updatePathText(path: String) {
-        pathText = SpannableStringBuilder("$path $ ").apply {
-            setSpan(ForegroundColorSpan(Color.parseColor("#ad91e9")), 0, length, 0)
+        if (path.startsWith("..")) {
+            environmentPath = File(environmentPath).parent ?: "/storage/emulated/0"
+            pathText = SpannableStringBuilder("$environmentPath $ ").apply {
+                setSpan(ForegroundColorSpan(Color.parseColor("#ad91e9")), 0, length, 0)
+            }
+            invalidate()
+            return
         }
 
-        environmentPath = path
-        invalidate()
+        if (path.startsWith("/")) {
+            environmentPath = path
+            pathText = SpannableStringBuilder("$environmentPath $ ").apply {
+                setSpan(ForegroundColorSpan(Color.parseColor("#ad91e9")), 0, length, 0)
+            }
+            invalidate()
+            return
+        }
+
+        val enviFile = File("$environmentPath/$path")
+        if (enviFile.isDirectory) {
+            environmentPath = enviFile.absolutePath
+            pathText = SpannableStringBuilder("$environmentPath $ ").apply {
+                setSpan(ForegroundColorSpan(Color.parseColor("#ad91e9")), 0, length, 0)
+            }
+            invalidate()
+            return
+        }
+
     }
 
     fun getMaxHeight(): Int {
