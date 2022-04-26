@@ -19,18 +19,24 @@ object ShellExecutor {
         this.onShellEventListener = onShellEventListener
     }
 
+    enum class ShellEvent {
+        INTERCEPTED, FALLACIOUS, SUCCESSFUL
+    }
+
     suspend fun execute(environmentPath: String, command: String) =
         suspendCoroutine<Result<String>> {
             thread {
                 val result = runCatching {
+                    val emptyText = ""
                     if (command.isEmpty()) {
-                        return@runCatching ""
+                        return@runCatching emptyText
                     }
                     // 删除前后空格
                     // 清除中间的空格
                     // 执行
+
                     val commands =
-                        command.trim().replace("\\s+".toRegex(), "#").split("#").toTypedArray()
+                        command.trim().replace("\\s+".toRegex(), ",").split(",").toTypedArray()
                     val func = commands[0]
                     val parameters = if (command.length > 1) {
                         val list = commands.toMutableList()
@@ -38,6 +44,16 @@ object ShellExecutor {
                         list.toTypedArray()
                     } else {
                         emptyArray()
+                    }
+
+                    val result = onShellEventListener?.onShellEvent(func, parameters)
+
+                    if (result == ShellEvent.INTERCEPTED) {
+                        return@runCatching emptyText
+                    }
+
+                    if(result == ShellEvent.FALLACIOUS) {
+                        return@runCatching emptyText
                     }
 
                     val permissionProcess =
@@ -56,15 +72,10 @@ object ShellExecutor {
                         }
                     }
 
-                    if (code == 0) {
+                    if (code == 0 && result == ShellEvent.SUCCESSFUL) {
                         String(byteArrayOutputStream.toByteArray())
                     } else {
-                        val result = onShellEventListener?.onShellEvent(func, parameters) ?: false
-                        if (result) {
-                            ""
-                        } else {
-                            "运行 $command 异常, 错误码: $code"
-                        }
+                        "运行 $command 异常, 错误码: $code"
                     }
                 }
 

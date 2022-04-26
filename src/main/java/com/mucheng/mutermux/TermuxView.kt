@@ -5,7 +5,10 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Typeface
-import android.text.*
+import android.text.Layout
+import android.text.SpannableStringBuilder
+import android.text.StaticLayout
+import android.text.TextPaint
 import android.text.style.ForegroundColorSpan
 import android.util.AttributeSet
 import android.util.Log
@@ -17,6 +20,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import com.mucheng.mutermux.interfaces.OnShellEventListener
+import com.mucheng.mutermux.util.getLineHeight
 import com.mucheng.mutermux.util.getSp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,7 +52,7 @@ class TermuxView @JvmOverloads constructor(
         color = Color.WHITE
     }
 
-    private val lineTexts = arrayListOf("")
+    private val lineTexts = arrayListOf("Welcome to use MuTermux!")
 
     private val eventHandler = EventHandler(this)
 
@@ -57,6 +61,8 @@ class TermuxView @JvmOverloads constructor(
     private val cursor = Cursor()
 
     private val lock = Mutex()
+
+    private var receiver = {}
 
     init {
         isFocusable = true
@@ -83,7 +89,13 @@ class TermuxView @JvmOverloads constructor(
         }
     }
 
+    fun receiveOnDraw(receiver: () -> Unit) {
+        this.receiver = receiver
+    }
+
     private val buffer = SpannableStringBuilder()
+
+    private var lineCount = 0
 
     @Suppress("DEPRECATION")
     @SuppressLint("DrawAllocation")
@@ -92,16 +104,22 @@ class TermuxView @JvmOverloads constructor(
         buffer.clear()
         buffer.clearSpans()
 
+        val sb = StringBuilder()
+        lineTexts.forEach {
+            sb.append(">> $it").append("\n")
+        }
+
         val text =
-            buffer.append(StringBuilder(lineTexts.joinToString(separator = "\n")).also {
-                if (it.isNotEmpty()) it.append(
-                    "\n"
-                )
-            }).append(userText).append(pathText).append(content)
+            buffer.append(sb)
+                .append(userText).append(pathText).append(content)
+
         val staticLayout = StaticLayout(
             text, textPaint, width, Layout.Alignment.ALIGN_NORMAL, 1f, 0f, true
         )
+
         staticLayout.draw(canvas)
+        lineCount = staticLayout.lineCount
+        receiver()
     }
 
     override fun onCheckIsTextEditor(): Boolean {
@@ -119,12 +137,10 @@ class TermuxView @JvmOverloads constructor(
                 KeyEvent.KEYCODE_ENTER -> commitText("\n")
 
                 KeyEvent.KEYCODE_DEL, KeyEvent.KEYCODE_FORWARD_DEL -> {
-                    val index = cursor.index
-                    val row = cursor.row
+                    val row = content.length
 
                     if (row > 0) {
-                        cursor.row--
-                        content.deleteCharAt(cursor.row)
+                        content.deleteCharAt(content.length - 1)
                         invalidate()
                         return super.onKeyDown(keyCode, event)
                     }
@@ -177,17 +193,42 @@ class TermuxView @JvmOverloads constructor(
             return
         }
 
+        // 向下偏移
+        val translation = eventHandler.getScrollTranslation()
+
+        if (content.isEmpty()) {
+            lineTexts.add("")
+            translation.translateY(getLineHeight(textPaint))
+            scrollTo(0, translation.getCurrentY())
+            invalidate()
+            return
+        }
+
         // 按回车了应执行代码
         CoroutineScope(Dispatchers.IO).launch {
             lock.lock()
             val cmd = content.toString()
             lineTexts.add(cmd)
-            Log.e("cont", content.toString())
             val result = ShellExecutor.execute(environmentPath, cmd)
             if (result.isSuccess) {
-                lineTexts.add("Success: ${result.getOrNull()}")
+                Log.e("clear", "${result.getOrNull()}")
+                if (handleText(result.getOrNull() ?: "")) {
+                    lineTexts.add(result.getOrNull() ?: "")
+                    translation.translateY(getLineHeight(textPaint))
+                    post {
+                        scrollTo(0, translation.getCurrentY())
+                    }
+                }
+
             } else {
-                lineTexts.add("Error: ${result.exceptionOrNull()?.message}")
+                val cause = result.exceptionOrNull()?.cause.toString()
+                val error = cause.split(", ")[1]
+
+                lineTexts.add("Error: $error")
+                translation.translateY(getLineHeight(textPaint))
+                post {
+                    scrollTo(0, translation.getCurrentY())
+                }
             }
             postInvalidate()
             content.clear()
@@ -196,24 +237,42 @@ class TermuxView @JvmOverloads constructor(
 
     }
 
-    override fun onShellEvent(command: String, params: Array<String>): Boolean {
+    private fun handleText(text: String): Boolean {
+        // 这里处理 clear 命令
+        if (text == "\u001B[2J\u001B[H") {
+            val welcomeText = lineTexts[0]
+            lineTexts.clear()
+            lineTexts.add(welcomeText)
+            eventHandler.getScrollTranslation().resetY()
+            post {
+                // 回去
+                scrollTo(0, 0)
+                invalidate()
+            }
+            return false
+        }
+
+        return true
+    }
+
+    // 在此拦截命令
+    override fun onShellEvent(command: String, params: Array<String>): ShellExecutor.ShellEvent {
         when (command) {
 
             "cd" -> {
                 if (params.isEmpty() || params.size > 1) {
-                    return false
+                    return ShellExecutor.ShellEvent.FALLACIOUS
                 }
 
                 // 获取参数
                 val path = params[0]
-                Log.e("Text", "$command $path")
                 updatePathText(path)
-                return true
+                return ShellExecutor.ShellEvent.INTERCEPTED
             }
 
         }
 
-        return false
+        return ShellExecutor.ShellEvent.SUCCESSFUL
     }
 
     private fun updatePathText(path: String) {
@@ -221,7 +280,12 @@ class TermuxView @JvmOverloads constructor(
             setSpan(ForegroundColorSpan(Color.parseColor("#ad91e9")), 0, length, 0)
         }
 
+        environmentPath = path
         invalidate()
+    }
+
+    fun getMaxHeight(): Int {
+        return (getLineHeight(textPaint) * lineCount - height / 2).toInt()
     }
 
 }

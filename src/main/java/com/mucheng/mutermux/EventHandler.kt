@@ -1,9 +1,22 @@
 package com.mucheng.mutermux
 
+import android.util.Log
 import android.view.GestureDetector
 import android.view.MotionEvent
+import com.mucheng.mutermux.util.Translation
 
-class EventHandler(private val termuxView: TermuxView) : GestureDetector.OnGestureListener, GestureDetector.OnDoubleTapListener {
+class EventHandler(private val termuxView: TermuxView) : GestureDetector.OnGestureListener,
+    GestureDetector.OnDoubleTapListener {
+
+    private val translation by lazy {
+        Translation().apply {
+            termuxView.receiveOnDraw {
+                setMaxPositionY(termuxView.getMaxHeight())
+            }
+        }
+    }
+
+    fun getScrollTranslation() = translation
 
     override fun onDown(p0: MotionEvent?): Boolean {
         return true
@@ -18,7 +31,9 @@ class EventHandler(private val termuxView: TermuxView) : GestureDetector.OnGestu
     }
 
     override fun onScroll(p0: MotionEvent?, p1: MotionEvent?, p2: Float, p3: Float): Boolean {
-        return false
+        translation.translateY(p3)
+        termuxView.scrollTo(translation.getCurrentX(), translation.getCurrentY())
+        return true
     }
 
     override fun onLongPress(p0: MotionEvent?) {
