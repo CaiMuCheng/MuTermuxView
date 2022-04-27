@@ -228,8 +228,16 @@ open class TermuxView @JvmOverloads constructor(
                 }
 
             } else {
-                val cause = result.exceptionOrNull()?.cause.toString()
-                val error = cause.split(", ").getOrNull(1) ?: ""
+                var localMessage = ""
+                val cause = result.exceptionOrNull()?.also {
+                    it.printStackTrace()
+                    localMessage = it.toString()
+                }?.cause.toString()
+                var error = cause.split(", ").getOrNull(1) ?: ""
+
+                if (error.isEmpty()) {
+                    error = localMessage
+                }
 
                 lineTexts.add("Error: $error")
                 translation.translateY(getLineHeight(textPaint))
